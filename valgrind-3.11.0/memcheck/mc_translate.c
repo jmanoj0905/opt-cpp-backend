@@ -48,7 +48,7 @@
 extern VgFile* trace_fp; // pgbovine
 extern int stdout_fd; // pgbovine
 static int n_steps = 0; // pgbovine
-const int MAX_STEPS = 5000; // pgbovine -- overbook a bit since the trace gets shortened in postprocessing anyhow
+const int MAX_STEPS = 1500; // pgbovine -- overbook a bit since the trace gets shortened in postprocessing anyhow. cpp-tutor: raw-instruction cap, lowered from 5000 to bound Valgrind wall-time so heavy STL programs self-terminate early with a partial trace instead of being killed by the backend timeout. ~1500 raw records dedups to well above the ~150 display-step cap in vg_to_opt_trace.py.
 
 #include "mc_include.h"
 

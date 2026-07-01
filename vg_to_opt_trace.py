@@ -43,7 +43,7 @@ pp = pprint.PrettyPrinter(indent=2)
 RECORD_SEP = '=== pg_trace_inst ==='
 
 
-MAX_STEPS = 1000
+MAX_STEPS = 150 # cpp-tutor: display-step cap. Learner-facing limit -- long/heavy programs are traced up to here, then cut off with a friendly message instead of failing outright.
 ONLY_ONE_REC_PER_LINE = True
 
 all_execution_points = []
@@ -455,7 +455,7 @@ void *x = foo(); // <-- there is an extraneous step here AFTER foo returns but
       # truncate to MAX_STEPS entries
         final_execution_points = final_execution_points[:MAX_STEPS]
         final_execution_points[-1]['event'] = 'instruction_limit_reached'
-        final_execution_points[-1]['exception_msg'] = 'Stopped after running ' + str(MAX_STEPS) + ' steps. Please shorten your code,\nsince Python Tutor is not designed to handle long-running code.'
+        final_execution_points[-1]['exception_msg'] = 'Showing the first ' + str(MAX_STEPS) + ' steps. This program runs longer than that - trace these steps, then try a smaller input to see the rest.'
 
 
     cod = open(fn).read()
