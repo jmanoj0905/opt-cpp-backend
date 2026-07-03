@@ -52,6 +52,12 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
     if not points:
         return points
 
+    # Accepted residual: a terminating-but-very-long program that BOTH exhausts
+    # the budget AND happens to repeat an observable state (possible because the
+    # fingerprint cannot see STL-internal heap/iterator state) is labeled
+    # infinite_loop_detected rather than instruction_limit_reached. Both outcomes
+    # stop the trace gracefully; the mislabel is cosmetic and only on programs
+    # already too long to finish.
     if max_steps_exceeded:
         # Program exhausted the raw budget -- it did NOT terminate on its own.
         # An exact observable-state repeat now proves a non-progressing cycle
@@ -59,6 +65,9 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
         # and never reached this branch). No repeat -> merely too long.
         seen = set()
         for i, point in enumerate(points):
+            if i >= display_cap:
+                break  # a cycle beyond the display ceiling is not shown;
+                       # fall through to the too-long path below
             fp = fingerprint(point)
             if fp in seen:
                 trimmed = points[:i + 1]

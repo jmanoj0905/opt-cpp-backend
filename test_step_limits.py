@@ -92,6 +92,17 @@ def test_no_false_positive_on_distinct_states():
     assert out[-1]["event"] == "return"
 
 
+def test_cycle_beyond_display_cap_is_instruction_limit():
+    # first state repeat is BEYOND display_cap -> not shown as a loop; the
+    # displayed window has no cycle, so it is labeled too-long at the ceiling
+    pts = [pt(n, {"i": n}) for n in range(6)]      # 6 distinct states
+    pts.append(pt(0, {"i": 0}))                    # repeat of index 0, at index 6
+    out = apply_step_limits(pts, True, display_cap=5)
+    assert len(out) == 5
+    assert out[-1]["event"] == "instruction_limit_reached"
+    assert "smaller input" in out[-1]["exception_msg"]
+
+
 def test_fingerprint_differs_on_line_and_matches_on_state():
     assert fingerprint(pt(1, {"i": 0})) == fingerprint(pt(1, {"i": 0}, stdout="z"))
     assert fingerprint(pt(1, {"i": 0})) != fingerprint(pt(2, {"i": 0}))
