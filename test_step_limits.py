@@ -37,24 +37,36 @@ def test_terminating_trace_is_unchanged():
 def test_state_cycle_flagged_as_infinite_loop():
     # index 0 and index 2 are byte-identical -> first repeat at index 2
     pts = [pt(5, {"x": 1}), pt(6, {"x": 2}), pt(5, {"x": 1})]
-    out = apply_step_limits(pts, False)
+    out = apply_step_limits(pts, True)  # budget exhausted + cycle
     assert len(out) == 3
     assert out[-1]["event"] == "infinite_loop_detected"
     assert "infinite loop" in out[-1]["exception_msg"]
     assert "5" in out[-1]["exception_msg"]
 
 
-def test_infinite_loop_wins_over_budget_exhaustion():
-    pts = [pt(5, {"x": 1}), pt(6, {"x": 2}), pt(5, {"x": 1})]
-    out = apply_step_limits(pts, True)  # budget also exhausted
-    assert out[-1]["event"] == "infinite_loop_detected"
-
-
 def test_stdout_excluded_from_fingerprint():
-    # identical memory, different stdout -> still a repeat
+    # identical memory, different stdout -> still a repeat (needs budget exhausted to flag)
     pts = [pt(5, {"x": 1}, stdout="a"), pt(5, {"x": 1}, stdout="ab")]
-    out = apply_step_limits(pts, False)
+    out = apply_step_limits(pts, True)
     assert out[-1]["event"] == "infinite_loop_detected"
+
+
+def test_state_repeat_not_flagged_when_terminated_within_budget():
+    # identical observable state at index 0 and 2, but program returned on
+    # its own (budget NOT exhausted) -> must NOT be called an infinite loop
+    pts = [pt(5, {"x": 1}), pt(6, {"x": 2}), pt(5, {"x": 1})]
+    pts[-1]["event"] = "return"
+    out = apply_step_limits(pts, False)
+    assert len(out) == 3
+    assert out[-1]["event"] == "return"
+    assert out[-1].get("exception_msg", "") == ""
+
+
+def test_same_cycle_flagged_only_when_budget_exhausted():
+    def cyc():
+        return [pt(5, {"x": 1}), pt(6, {"x": 2}), pt(5, {"x": 1})]
+    assert apply_step_limits(cyc(), False)[-1]["event"] != "infinite_loop_detected"
+    assert apply_step_limits(cyc(), True)[-1]["event"] == "infinite_loop_detected"
 
 
 def test_long_not_stuck_gets_budget_message():
