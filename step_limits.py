@@ -54,6 +54,7 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
         fp = fingerprint(point)
         if fp in seen:
             trimmed = points[:i + 1]
+            trimmed[-1] = dict(trimmed[-1])
             trimmed[-1]["event"] = "infinite_loop_detected"
             trimmed[-1]["exception_msg"] = _loop_msg(trimmed[-1]["line"])
             return trimmed
@@ -61,6 +62,8 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
 
     # budget exhaustion (raw cap hit, but state kept progressing)
     if max_steps_exceeded:
+        points = points[:]
+        points[-1] = dict(points[-1])
         points[-1]["event"] = "instruction_limit_reached"
         points[-1]["exception_msg"] = _TOO_LONG_MSG
         return points
@@ -68,6 +71,7 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
     # display safety ceiling (only cheap scalar programs reach this)
     if len(points) > display_cap:
         points = points[:display_cap]
+        points[-1] = dict(points[-1])
         points[-1]["event"] = "instruction_limit_reached"
         points[-1]["exception_msg"] = _TOO_LONG_MSG
     return points
