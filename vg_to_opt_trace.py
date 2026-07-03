@@ -37,19 +37,25 @@ import os
 import pprint
 import sys
 from optparse import OptionParser
+from step_limits import apply_step_limits
 
 pp = pprint.PrettyPrinter(indent=2)
 
 RECORD_SEP = '=== pg_trace_inst ==='
 
 
-MAX_STEPS = 150 # cpp-tutor: display-step cap. Learner-facing limit -- long/heavy programs are traced up to here, then cut off with a friendly message instead of failing outright.
 ONLY_ONE_REC_PER_LINE = True
 
 all_execution_points = []
 
+# cpp-tutor: set True when the raw-instruction cap fires in mc_translate.c
+# (the MAX_STEPS_EXCEEDED marker). Lets postprocess tell "program too long"
+# apart from natural termination. See step_limits.apply_step_limits.
+max_steps_exceeded = False
+
 # False if record isn't parsed properly or is an exception
 def process_record(lines):
+    global max_steps_exceeded
     if not lines:
         return True # 'nil success case to keep the parser going
 
@@ -62,7 +68,7 @@ def process_record(lines):
         elif e.startswith('STDOUT: '):
             stdout_lines.append(e)
         elif e.startswith('MAX_STEPS_EXCEEDED'):
-            pass # oof
+            max_steps_exceeded = True
         else:
             regular_lines.append(e)
 
@@ -451,11 +457,11 @@ void *x = foo(); // <-- there is an extraneous step here AFTER foo returns but
     final_execution_points = [e for e in final_execution_points if 'to_delete' not in e]
 
 
-    if len(final_execution_points) > MAX_STEPS:
-      # truncate to MAX_STEPS entries
-        final_execution_points = final_execution_points[:MAX_STEPS]
-        final_execution_points[-1]['event'] = 'instruction_limit_reached'
-        final_execution_points[-1]['exception_msg'] = 'Showing the first ' + str(MAX_STEPS) + ' steps. This program runs longer than that - trace these steps, then try a smaller input to see the rest.'
+    # cpp-tutor: intelligent step cap. Detect true infinite loops (exact state
+    # repetition) vs. programs merely too long (raw cap hit), and trim/label
+    # accordingly. Replaces the old fixed 150-step truncation.
+    final_execution_points = apply_step_limits(
+        final_execution_points, max_steps_exceeded)
 
 
     cod = open(fn).read()
