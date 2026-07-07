@@ -141,7 +141,7 @@ def process_json_obj(obj, err_str, stdout_str):
         for g_var, g_val in obj['globals'].iteritems():
             enc_globals[g_var] = encode_value(g_val, heap)
 
-    for e in obj['stack']:
+    for depth, e in enumerate(obj['stack']):
         stack_obj = {}
         stack.append(stack_obj)
 
@@ -149,9 +149,13 @@ def process_json_obj(obj, err_str, stdout_str):
         stack_obj['ordered_varnames'] = e['ordered_varnames']
         stack_obj['is_highlighted'] = e is top_stack_entry
 
-        # hacky: does FP (the frame pointer) serve as a unique enough frame ID?
-        # sometimes it's set to 0 :/
-        stack_obj['frame_id'] = e['FP']
+        # FP alone is not a unique frame ID: g++-compiled member functions
+        # (methods, constructors) report the *caller's* FP for their entire
+        # lifetime, so a method frame and its parent share an FP. Suffix the
+        # stack depth to disambiguate; depth is stable for a live frame, so
+        # the ID stays stable across steps and call/return detection (which
+        # compares whole frame_id lists) keeps working.
+        stack_obj['frame_id'] = e['FP'] + '_' + str(depth)
 
         stack_obj['unique_hash'] = stack_obj['func_name'] + '_' + stack_obj['frame_id']
 
@@ -268,15 +272,19 @@ if __name__ == '__main__':
 
     for pt in all_execution_points:
         # any execution point with a 0x0 frame pointer is bogus
+        # (frame_id is 'FP_depth', so match on the FP prefix)
         frame_ids = [e['frame_id'] for e in pt['stack_to_render']]
         func_names = [e['func_name'] for e in pt['stack_to_render']]
-        if '0x0' in frame_ids:
+        if any(fid.startswith('0x0_') for fid in frame_ids):
             continue
 
-        # any point with DUPLICATE frame_ids is bogus, since it means
-        # that the frame_id of some frame hasn't yet been updated
-        if len(set(frame_ids)) < len(frame_ids):
-            continue
+        # NB: there used to be a "duplicate frame_ids are bogus" filter here
+        # from when frame_id was the bare FP. It threw away every step inside
+        # a member function (methods share their caller's FP -- see the
+        # frame_id comment in process_json_obj). Depth-suffixed frame_ids are
+        # unique by construction, and transient mid-prologue points (the
+        # thing the filter actually caught) are absorbed by the frame_id
+        # continuity check below.
 
         # any point with a weird '???' function name is bogus
         # but we shouldn't have any more by now
