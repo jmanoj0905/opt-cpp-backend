@@ -37,7 +37,7 @@ import os
 import pprint
 import sys
 from optparse import OptionParser
-from step_limits import apply_step_limits
+from step_limits import apply_step_limits, VGTRACE_BYTE_BUDGET
 
 pp = pprint.PrettyPrinter(indent=2)
 
@@ -85,7 +85,11 @@ def process_record(lines):
         print >> sys.stderr, "Ugh, bad record!", rec
         return False
 
-    assert len(stdout_lines) == 1 # always have one!
+    # normally exactly one STDOUT line per record; a record cut off mid-write
+    # (the run_cpp_backend.py watchdog kills valgrind when the trace outgrows
+    # its budget) can be missing it -- drop the record instead of crashing
+    if len(stdout_lines) != 1:
+        return False
     # it's encoded as JSON in a single line
     stdout_str = json.loads(stdout_lines[0][len('STDOUT: '):])
 
@@ -242,8 +246,15 @@ if __name__ == '__main__':
                       help="Dump pretty-printed JSON as output")
     parser.add_option("--end-of-trace-error-msg", dest="end_of_trace_error_msg", default=None,
                       help="Display this error message at the end of the trace")
+    parser.add_option("--trace-truncated", dest="trace_truncated", action="store_true", default=False,
+                      help="The vgtrace was cut off by the watchdog (byte/wall budget); label the trace as too long")
 
     (options, args) = parser.parse_args()
+
+    if options.trace_truncated:
+        # valgrind was killed before the program finished -- same meaning as
+        # the in-band MAX_STEPS_EXCEEDED marker
+        max_steps_exceeded = True
 
     fn = args[0]
     basename, ext = os.path.splitext(fn)
@@ -252,19 +263,31 @@ if __name__ == '__main__':
 
     success = True
 
+    # parse at most VGTRACE_BYTE_BUDGET bytes: decoded points for a huge
+    # vgtrace do not fit in the tracing container's RAM (256MB), and the
+    # display cap would throw the excess away anyway. Stopping early means
+    # the program ran longer than we can show -- same as the raw-step cap.
+    bytes_read = 0
+    stopped_at_byte_budget = False
+
     for line in open(basename + '.vgtrace'):
+        bytes_read += len(line)
         line = line.strip()
         if line == RECORD_SEP:
             success = process_record(cur_record_lines)
             if not success:
                 break
             cur_record_lines = []
+            if bytes_read > VGTRACE_BYTE_BUDGET:
+                stopped_at_byte_budget = True
+                max_steps_exceeded = True
+                break
         else:
             cur_record_lines.append(line)
 
     # only parse final record if we've been successful so far; i.e., die
     # on the first failed parse
-    if success:
+    if success and not stopped_at_byte_budget:
         success = process_record(cur_record_lines)
 
     # now do some filtering action based on heuristics

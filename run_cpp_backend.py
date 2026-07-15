@@ -5,9 +5,12 @@
 
 import json
 import os
+import time
 from subprocess import Popen, PIPE
 import re
 import sys
+
+from step_limits import VGTRACE_BYTE_BUDGET, VALGRIND_WALL_SECONDS
 
 VALGRIND_MSG_RE = re.compile('==\d+== (.*)$')
 end_of_trace_error_msg = None
@@ -72,6 +75,31 @@ if gcc_retcode == 0:
                        stdout=PIPE, stderr=PIPE, stdin=PIPE)
 
     valgrind_p.stdin.write(USER_INPUT)
+    valgrind_p.stdin.close()
+    valgrind_p.stdin = None  # py2 communicate() would flush the closed pipe
+
+    # cpp-tutor watchdog: MAX_STEPS in mc_translate.c bounds how many records
+    # valgrind writes, but not their SIZE or the wall clock between them. A
+    # program with a big live data structure dumps ~50KB per step and grows
+    # the vgtrace past what the postprocessor can chew inside the backend's
+    # request timeout (it OOMs the 256MB container). Kill valgrind once the
+    # trace outgrows its byte budget or the stage its wall budget; the
+    # partial vgtrace up to that point is still perfectly decodable and gets
+    # labeled as truncated (--trace-truncated below).
+    trace_truncated = False
+    watchdog_deadline = time.time() + VALGRIND_WALL_SECONDS
+    while valgrind_p.poll() is None:
+        too_big = (os.path.exists(VGTRACE_PATH) and
+                   os.path.getsize(VGTRACE_PATH) > VGTRACE_BYTE_BUDGET)
+        if too_big or time.time() > watchdog_deadline:
+            trace_truncated = True
+            try:
+                valgrind_p.kill()
+            except OSError:
+                pass  # exited between poll() and kill()
+            break
+        time.sleep(0.25)
+
     (valgrind_stdout, valgrind_stderr) = valgrind_p.communicate()
     valgrind_retcode = valgrind_p.returncode
 
@@ -115,6 +143,8 @@ if gcc_retcode == 0:
         args.append('--jsondump')
     if end_of_trace_error_msg:
         args += ['--end-of-trace-error-msg', end_of_trace_error_msg]
+    if trace_truncated:
+        args.append('--trace-truncated')
     args.append(F_PATH)
 
     postprocess_p = Popen(args, stdout=PIPE, stderr=PIPE)
