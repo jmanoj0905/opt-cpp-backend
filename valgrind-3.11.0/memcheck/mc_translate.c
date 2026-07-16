@@ -45,6 +45,7 @@
 #include "pub_tool_stacktrace.h" // pgbovine
 #include "pub_tool_threadstate.h" // pgbovine
 #include "pub_tool_oset.h" // pgbovine
+#include "pub_tool_guest.h" // pgbovine cpp-tutor: VexGuestArchState, for return-value register capture
 extern VgFile* trace_fp; // pgbovine
 extern int stdout_fd; // pgbovine
 static int n_steps = 0; // pgbovine
@@ -6259,7 +6260,21 @@ static Bool checkForBogusLiterals ( /*FLAT*/ IRStmt* st )
 
 
 // pgbovine
-VG_REGPARM(1) void pg_trace_inst(Addr ad);
+// cpp-tutor: capture the integer/pointer return-value register on every
+// traced instruction (cheap: one extra Get on an already-per-instruction
+// hook) so vg_to_opt_trace.py can read it off the last instruction of a
+// returning frame. x86-64 SysV / AAPCS64 both put a <=64-bit scalar return
+// value here; float/double (XMM0) and struct-by-value returns are not
+// captured -- out of scope for this MVP.
+#if defined(VGA_amd64)
+#  define PG_RETVAL_REG_OFFSET (offsetof(VexGuestArchState, guest_RAX))
+#elif defined(VGA_arm64)
+#  define PG_RETVAL_REG_OFFSET (offsetof(VexGuestArchState, guest_X0))
+#else
+#  error "pg_trace return-value capture: unsupported guest arch"
+#endif
+
+VG_REGPARM(2) void pg_trace_inst(Addr ad, ULong ret_reg);
 
 // any addresses whose values have already been encoded FOR THIS STEP!
 // (remember to reset between steps)
@@ -6267,8 +6282,8 @@ OSet* pg_encoded_addrs = NULL;
 #define USER_STDOUT_BUF_SIZE 10 * 1024 * 1024
 char user_stdout_buf[USER_STDOUT_BUF_SIZE]; // TODO: make this bigger?
 
-VG_REGPARM(1)
-void pg_trace_inst(Addr a)
+VG_REGPARM(2)
+void pg_trace_inst(Addr a, ULong ret_reg)
 {
   // adapted from ../coregrind/m_addrinfo.c
   const HChar *file;
@@ -6328,11 +6343,13 @@ void pg_trace_inst(Addr a)
     //            (int)kind);
 
     VG_(fprintf)(trace_fp,
-                "\"func_name\": \"%s\", \"line\": %d, \"IP\": \"%p\", \"kind\": %d, ",
+                "\"func_name\": \"%s\", \"line\": %d, \"IP\": \"%p\", \"kind\": %d, "
+                "\"ret_reg\": %llu, ",
                 hasfn ? fn : "???",
                 haslinenum ? linenum : -999,
                 (void*)a,
-                (int)kind);
+                (int)kind,
+                ret_reg);
 
     Addr ips[100];
     Addr sps[100];
@@ -6782,17 +6799,27 @@ IRSB* MC_(instrument) ( VgCallbackClosure* closure,
             complainIfUndefined( &mce, st->Ist.Exit.guard, NULL );
             break;
 
-         case Ist_IMark:
+         case Ist_IMark: {
             // pgbovine -- from fjalar
-            di = unsafeIRDirty_0_N(1/*regparms*/,
+            // cpp-tutor: return-value register, read on every instruction
+            // (cheapest correct point to read it is unknown ahead of time,
+            // so we just always read it -- see PG_RETVAL_REG_OFFSET). Dirty
+            // call args must be flat atoms, so assign the Get to a temp
+            // first rather than passing it inline (raw Get fails the IR
+            // sanity check: "IRStmt: is not flat").
+            IRAtom* retReg = assignNew('C', &mce, Ity_I64,
+                                        IRExpr_Get(PG_RETVAL_REG_OFFSET, Ity_I64));
+            di = unsafeIRDirty_0_N(2/*regparms*/,
                  "pg_trace_inst",
                  &pg_trace_inst,
-                 mkIRExprVec_1(IRExpr_Const(IRConst_U64(st->Ist.IMark.addr))));
+                 mkIRExprVec_2(IRExpr_Const(IRConst_U64(st->Ist.IMark.addr)),
+                               retReg));
             // TODO: need to mark what parts the dirty instruction might access
             // so that Valgrind doesn't optimize code away or something?!?
             stmt('V', &mce, IRStmt_Dirty(di));
             // END pgbovine
             break;
+         }
 
          case Ist_NoOp:
          case Ist_MBE:

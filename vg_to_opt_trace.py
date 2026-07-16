@@ -35,6 +35,7 @@ gcc version 4.8.4 (Ubuntu 4.8.4-2ubuntu1~14.04)
 import json
 import os
 import pprint
+import re
 import sys
 from optparse import OptionParser
 from step_limits import apply_step_limits, VGTRACE_BYTE_BUDGET
@@ -132,6 +133,10 @@ def process_json_obj(obj, err_str, stdout_str):
 
     ret['line'] = obj['line']
     ret['func_name'] = top_stack_entry['func_name'] # use the 'topmost' entry's name
+    # cpp-tutor: raw return-value register (RAX/X0), captured on every
+    # instruction by mc_translate.c. Only meaningful on the last instruction
+    # of a frame that's about to pop -- see attach_return_values() below.
+    ret['ret_reg'] = obj.get('ret_reg')
 
     if err_str:
         ret['event'] = 'exception'
@@ -236,6 +241,58 @@ def encode_value(obj, heap):
         assert False
 
 
+# cpp-tutor: return-value capture (scalar-only MVP -- see mc_translate.c's
+# PG_RETVAL_REG_OFFSET comment). We have no DWARF return-type info, so we
+# can't tell a void function from an int-returning one by type; instead we
+# check whether the frame, at any point during ITS OWN invocation, executed
+# a source line containing "return <expr>;" -- if so we trust ret_reg
+# (RAX/X0), read on the frame's last traced instruction, to hold the actual
+# return value (the epilogue that follows never clobbers it).
+# search() (not match()/^-anchored) on purpose: a base case like
+# "if (n <= 1) return n;" puts the return statement mid-line.
+RETURN_EXPR_RE = re.compile(r'\breturn\b\s*([^;]*);')
+
+
+def frame_returns_scalar(lines_visited):
+    for ln in lines_visited:
+        if ln is None or ln < 1 or ln > len(source_lines):
+            continue
+        m = RETURN_EXPR_RE.search(source_lines[ln - 1])
+        if m and m.group(1).strip():
+            return True
+    return False
+
+
+def to_signed32(u):
+    u &= 0xFFFFFFFF
+    return u - 0x100000000 if u & 0x80000000 else u
+
+
+def attach_return_values(execution_points):
+    for i, pt in enumerate(execution_points):
+        if pt['event'] != 'return':
+            continue
+        frames = pt['stack_to_render']
+        ret_reg = pt.get('ret_reg')
+        if not frames or ret_reg is None:
+            continue
+
+        callee = frames[-1]
+        depth = len(frames)
+        lines_visited = []
+        j = i
+        while j >= 0:
+            fs = execution_points[j]['stack_to_render']
+            if len(fs) != depth or fs[-1]['frame_id'] != callee['frame_id']:
+                break
+            lines_visited.append(execution_points[j]['line'])
+            j -= 1
+
+        if frame_returns_scalar(lines_visited):
+            callee['encoded_locals']['__return__'] = \
+                ['C_DATA', '<register>', 'int', to_signed32(ret_reg)]
+
+
 if __name__ == '__main__':
     parser = OptionParser(usage="Create an OPT trace from a Valgrind trace")
     parser.add_option("--create_jsvar", dest="js_varname", default=None,
@@ -259,6 +316,8 @@ if __name__ == '__main__':
     fn = args[0]
     basename, ext = os.path.splitext(fn)
     assert ext in ('.c', '.cpp')
+    cod = open(fn).read()
+    source_lines = cod.split('\n')
     cur_record_lines = []
 
     success = True
@@ -404,6 +463,12 @@ if __name__ == '__main__':
                 # make last statement a faux 'return', presumably from main
                 final_execution_points[-1]['event'] = 'return'
 
+        # cpp-tutor: must run on the still-undeduped final_execution_points
+        # (one entry per traced instruction) -- it needs the fine-grained
+        # per-instruction line history to find a frame's return statement,
+        # which the ONLY_ONE_REC_PER_LINE/to_delete passes below collapse away.
+        attach_return_values(final_execution_points)
+
 
     # kludgy: don't do to_delete for return events, since if we do this,
     # then we may be skipping return events for one-liner functions like
@@ -495,7 +560,6 @@ void *x = foo(); // <-- there is an extraneous step here AFTER foo returns but
         final_execution_points, max_steps_exceeded)
 
 
-    cod = open(fn).read()
     # produce the final trace, voila!
     final_res = {'code': cod, 'trace': final_execution_points}
 
