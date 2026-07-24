@@ -38,7 +38,7 @@ import pprint
 import re
 import sys
 from optparse import OptionParser
-from step_limits import apply_step_limits, VGTRACE_BYTE_BUDGET, SPIN_RUN
+from step_limits import apply_step_limits, VGTRACE_BYTE_BUDGET, SPIN_RUN, fingerprint
 
 pp = pprint.PrettyPrinter(indent=2)
 
@@ -483,34 +483,36 @@ if __name__ == '__main__':
 
 
     # cpp-tutor: detect a single-line spin (while(true);) from the RAW stream
-    # BEFORE ONLY_ONE_REC_PER_LINE collapses it. If the program hit the raw
-    # instruction cap while stuck on one (line, frame) -- the tail of the raw
-    # step_line stream is a long run of identical (line, frame) records -- it
-    # is a genuine infinite loop the deduped stream can no longer show.
+    # BEFORE ONLY_ONE_REC_PER_LINE collapses it. A genuine spin is stuck in an
+    # IDENTICAL observable state (same fingerprint) for a long run at the cap;
+    # keying on fingerprint (not just line/frame) avoids mislabeling a bounded
+    # but slow single-line loop whose locals change each pass. fingerprint
+    # excludes event, so the trailing point's spurious 'return' relabel is
+    # irrelevant here.
     #
-    # NOTE: the "if success:" block above (which fires whenever record
-    # parsing succeeded, independent of max_steps_exceeded) has already
-    # relabeled final_execution_points[-1]['event'] to 'return', even when
-    # the program was actually cut off at the raw cap. So this scan cannot
-    # gate on event == 'step_line' for the tail point; it breaks only on a
-    # 'call' (a genuinely new, deeper frame -- key comparison below also
-    # catches this naturally, since a call changes the frame_id tuple).
+    # We skip the synthetic end-of-trace point (the "if success:" block above
+    # relabels final_execution_points[-1] to 'return', and attach_return_values
+    # then decorates its frame with a __return__ pseudo-local): it is not a
+    # real observable state the program passed through, and its decorated
+    # locals would otherwise contaminate the tail fingerprint. Skipping it is
+    # the same kind of artifact-skip as the 'to_delete' skip above it.
     spin_at_cap = False
     if max_steps_exceeded:
         run = 0
-        tail_key = None
+        tail_fp = None
         for elt in reversed(final_execution_points):
             if 'to_delete' in elt:
                 continue
-            if elt.get('event') == 'call':
-                break
-            key = (elt['line'],
-                   tuple(f['frame_id'] for f in elt['stack_to_render']))
-            if tail_key is None:
-                tail_key = key
-            if key != tail_key:
+            if elt.get('event') == 'return':
+                continue
+            fp = fingerprint(elt)
+            if tail_fp is None:
+                tail_fp = fp
+            if fp != tail_fp:
                 break
             run += 1
+            if run >= SPIN_RUN:
+                break
         spin_at_cap = run >= SPIN_RUN
 
     # only keep the FIRST 'step_line' event for any given line, to match what
