@@ -22,7 +22,7 @@ DISPLAY_CAP = 2000
 SPIN_RUN = 8
 
 # Byte/wall budgets that keep the whole tracing pipeline inside the backend's
-# 60s request timeout even when each step's memory dump is huge (a big
+# 120s request timeout even when each step's memory dump is huge (a big
 # std::vector mutated in a long loop writes ~50KB per record; 3500 records is
 # a 100MB+ vgtrace that thrashes and then OOMs the 256MB container). The raw
 # MAX_STEPS cap in mc_translate.c bounds record COUNT only, so record SIZE
@@ -31,16 +31,18 @@ SPIN_RUN = 8
 #    watchdog) and the postprocess parse loop (vg_to_opt_trace.py) once the
 #    vgtrace outgrows what the postprocessor can decode inside its RAM/time
 #    slice. Measured on arm64/OrbStack: valgrind writes ~3.6MB/s, postprocess
-#    parses ~10MB/s, so 30MB is ~9s + ~3s locally; production is ~7.6x slower
+#    parses ~10MB/s, so 128MB is ~36s + ~13s locally; production is ~7.6x slower
 #    but then the wall cap below binds first.
 #  - VALGRIND_WALL_SECONDS kills a valgrind run that burns wall clock without
 #    growing the trace (heavy compute between traced lines). Sized so
 #    wall + worst-case parse of what could be written in that wall time +
-#    compile stays under the 60s backend timeout at production speeds.
+#    compile stays under the 120s backend timeout at production speeds.
 # Either cutoff yields a TRUNCATED trace that step_limits labels for the
 # learner instead of the request dying as a bare 503 with zero steps.
-VGTRACE_BYTE_BUDGET = 30 * 1024 * 1024
-VALGRIND_WALL_SECONDS = 35
+# Sized from a measured reference (5x5 surround-regions DFS): 24,043 raw
+# steps, 90.8 MB vgtrace, 46.6 s local wall.
+VGTRACE_BYTE_BUDGET = 128 * 1024 * 1024
+VALGRIND_WALL_SECONDS = 90
 
 _TOO_LONG_MSG = ("This program runs longer than we can trace. Trace these "
                  "steps, then try a smaller input to see the rest.")
