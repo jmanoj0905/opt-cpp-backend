@@ -4,9 +4,11 @@
 # limits is left untouched; a true infinite loop (when the program has
 # exhausted its raw-instruction budget AND returns to a byte-identical
 # observable state -- in the deterministic tracer sandbox, no net, no stdin,
-# no clock branching -- this proves non-termination) is trimmed at the first
-# repeat and labeled; a program merely too long (raw-instruction cap hit, no
-# state repeat) is labeled as such.
+# no clock branching -- this proves non-termination) is trimmed at the second
+# occurrence of the final observable state (a real cycle, requiring a non-empty
+# body between the two sightings), or -- for a single-line spin the dedup pass
+# collapses -- flagged from vg_to_opt_trace.py's raw-tail scan; a program merely
+# too long (raw-instruction cap hit, no cycle) is labeled as such.
 #
 # Python 2/3 compatible on purpose: imported by vg_to_opt_trace.py under
 # Python 2 in-container, unit-tested under Python 3. ASCII only. No Python-3-only
@@ -15,16 +17,17 @@ import json
 
 DISPLAY_CAP = 2000
 
-# Minimum length of an identical (line, frame) run at the tail of the RAW
-# pre-dedup trace that marks a genuine single-line spin loop (while(true);).
-# Used by vg_to_opt_trace.py, which sees the raw stream; the deduped stream
-# step_limits receives has already collapsed such a run away.
+# Minimum length of an identical-fingerprint (full observable state) run at the
+# tail of the RAW pre-dedup trace that marks a genuine single-line spin loop
+# (while(true);). Used by vg_to_opt_trace.py, which sees the raw stream; the
+# deduped stream step_limits receives has already collapsed such a run away.
 SPIN_RUN = 8
 
 # Byte/wall budgets that keep the whole tracing pipeline inside the backend's
 # 120s request timeout even when each step's memory dump is huge (a big
-# std::vector mutated in a long loop writes ~50KB per record; 3500 records is
-# a 100MB+ vgtrace that thrashes and then OOMs the 256MB container). The raw
+# std::vector mutated in a long loop writes ~50KB per record; an uncapped run
+# is a 100MB+ vgtrace that thrashes RAM -- the 2g container absorbs the ~128MB
+# worst case, but record COUNT still needs its own cap). The raw
 # MAX_STEPS cap in mc_translate.c bounds record COUNT only, so record SIZE
 # needs its own cap:
 #  - VGTRACE_BYTE_BUDGET stops the valgrind stage (run_cpp_backend.py
