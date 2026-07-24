@@ -49,7 +49,7 @@
 extern VgFile* trace_fp; // pgbovine
 extern int stdout_fd; // pgbovine
 static int n_steps = 0; // pgbovine
-const int MAX_STEPS = 3500; // cpp-tutor: raw-instruction cap sized so worst-case STL wall-time is ~45s at prod limits (1 CPU / 256 MB), under the 60s backend timeout. Validated: 3500 raw steps = 5.8s locally on Mac/OrbStack (ARM64); production is ~7.6x slower, so ~44s on prod (from 1500-raw~=19s-prod baseline). Display ceiling (step_limits.DISPLAY_CAP=2000) is higher so STL programs hit THIS raw cap first.
+const int MAX_STEPS = 30000; // cpp-tutor: raw-instruction cap. Sized from a measured reference (5x5 surround-regions DFS = 24,043 raw steps, 90.8 MB vgtrace, 46.6 s local ARM64/OrbStack wall). Production is ~7.6x slower; the 120s backend timeout and 128MB VGTRACE_BYTE_BUDGET (step_limits.py) are the coupled ceilings. Display cap (step_limits.DISPLAY_CAP=2000) is higher, so STL programs still hit resource caps first.
 
 #include "mc_include.h"
 
