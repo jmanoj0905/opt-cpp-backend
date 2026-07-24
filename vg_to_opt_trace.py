@@ -487,6 +487,14 @@ if __name__ == '__main__':
     # instruction cap while stuck on one (line, frame) -- the tail of the raw
     # step_line stream is a long run of identical (line, frame) records -- it
     # is a genuine infinite loop the deduped stream can no longer show.
+    #
+    # NOTE: the "if success:" block above (which fires whenever record
+    # parsing succeeded, independent of max_steps_exceeded) has already
+    # relabeled final_execution_points[-1]['event'] to 'return', even when
+    # the program was actually cut off at the raw cap. So this scan cannot
+    # gate on event == 'step_line' for the tail point; it breaks only on a
+    # 'call' (a genuinely new, deeper frame -- key comparison below also
+    # catches this naturally, since a call changes the frame_id tuple).
     spin_at_cap = False
     if max_steps_exceeded:
         run = 0
@@ -494,7 +502,7 @@ if __name__ == '__main__':
         for elt in reversed(final_execution_points):
             if 'to_delete' in elt:
                 continue
-            if elt.get('event') != 'step_line':
+            if elt.get('event') == 'call':
                 break
             key = (elt['line'],
                    tuple(f['frame_id'] for f in elt['stack_to_render']))
