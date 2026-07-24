@@ -15,10 +15,10 @@ import json
 
 DISPLAY_CAP = 2000
 
-# Minimum length of an all-identical tail run that counts as a genuine
-# single-line spin loop (while(true);). Below this, an adjacent/short
-# identical run is a degenerate repeat (e.g. multiple basic-block samples of
-# one multi-part source line caught at the step cap), not a loop.
+# Minimum length of an identical (line, frame) run at the tail of the RAW
+# pre-dedup trace that marks a genuine single-line spin loop (while(true);).
+# Used by vg_to_opt_trace.py, which sees the raw stream; the deduped stream
+# step_limits receives has already collapsed such a run away.
 SPIN_RUN = 8
 
 # Byte/wall budgets that keep the whole tracing pipeline inside the backend's
@@ -69,18 +69,6 @@ def fingerprint(point):
     return json.dumps(state, sort_keys=True)
 
 
-def _tail_run_length(fps):
-    """Count identical fingerprints at the very end of the trace."""
-    last = fps[-1]
-    count = 0
-    for k in range(len(fps) - 1, -1, -1):
-        if fps[k] == last:
-            count += 1
-        else:
-            break
-    return count
-
-
 def _loop_cut_index(points):
     """Index to trim at for a genuine infinite loop, or None.
 
@@ -114,12 +102,10 @@ def _loop_cut_index(points):
     full period) and then stops -- short for a long loop, whole for a tiny one.
     Returns None when the final state is novel (no cycle).
 
-    Guards against non-trivial-period false positives too: an adjacent or
-    short-run repeat of the final state with an empty body in between is NOT
-    treated as a cycle unless it is also a genuine single-line spin (a long
-    identical tail run), since a repeat with no observable work between the
-    two sightings can also be two basic-block samples of one multi-part
-    source line caught at the step cap."""
+    Guards against non-trivial-period false positives too: a degenerate repeat
+    with an empty body between the two sightings (e.g. two basic-block samples
+    of one multi-part source line caught at the step cap) is NOT a cycle.
+    (Single-line spins are handled separately, upstream, via the spin flag.)"""
     n = len(points)
     if n < 2:
         return None
@@ -133,21 +119,20 @@ def _loop_cut_index(points):
             first = i
             continue
         # Second occurrence at i: the pair (first, i) is the cut boundary.
-        # Only a real cycle counts. A real cycle either did observable work
-        # between the two sightings (a distinct intermediate state -> real
-        # loop body) or is a genuine single-line spin (a long identical tail
-        # run). A degenerate repeat -- adjacent sightings with an empty body,
-        # e.g. two basic-block samples of one multi-part source line cut off
-        # at the step cap -- is NOT a loop; the program was still progressing.
+        # Only a real cycle counts: it did observable work between the two
+        # sightings (a distinct intermediate state -> real loop body). A
+        # degenerate repeat -- adjacent sightings with an empty body, e.g. two
+        # basic-block samples of one multi-part source line cut off at the
+        # step cap -- is NOT a loop; the program was still progressing.
         has_body = any(fps[k] != last for k in range(first + 1, i))
-        is_spin = _tail_run_length(fps) >= SPIN_RUN
-        if has_body or is_spin:
+        if has_body:
             return i + 1
         return None
     return None
 
 
-def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
+def apply_step_limits(points, max_steps_exceeded, spin_at_cap=False,
+                       display_cap=DISPLAY_CAP):
     """Trim `points` and tag the final point with an end-of-trace reason.
 
     Budget-gated: infinite-loop classification happens ONLY when the program
@@ -155,7 +140,9 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
     terminates within budget is never flagged as looping -- an exact repeat of
     its observable state does not prove non-termination, because the fingerprint
     cannot see STL-internal heap/iterator state that may still be progressing.
-    Never mutates the caller's input dicts."""
+    `spin_at_cap` (set by vg_to_opt_trace.py from the raw pre-dedup tail) marks
+    a single-line spin the dedup pass has already collapsed; it is labeled an
+    infinite loop directly. Never mutates the caller's input dicts."""
     if not points:
         return points
 
@@ -165,6 +152,16 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
         # _loop_cut_index). Work within the display window so a decision made on
         # the final shown state matches what the learner sees.
         window = points[:display_cap] if len(points) > display_cap else points
+        if spin_at_cap:
+            # Single-line spin (while(true);): the raw cap was hit while stuck
+            # on one (line, frame). ONLY_ONE_REC_PER_LINE dedup already
+            # collapsed the run, so the deduped window cannot show the cycle;
+            # vg_to_opt_trace.py set this flag from the raw tail. Label directly.
+            spun = window[:]
+            spun[-1] = dict(spun[-1])
+            spun[-1]["event"] = "infinite_loop_detected"
+            spun[-1]["exception_msg"] = _loop_msg(spun[-1]["line"])
+            return spun
         cut = _loop_cut_index(window)
         if cut is not None:
             trimmed = window[:cut]

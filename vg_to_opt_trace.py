@@ -38,7 +38,7 @@ import pprint
 import re
 import sys
 from optparse import OptionParser
-from step_limits import apply_step_limits, VGTRACE_BYTE_BUDGET
+from step_limits import apply_step_limits, VGTRACE_BYTE_BUDGET, SPIN_RUN
 
 pp = pprint.PrettyPrinter(indent=2)
 
@@ -482,6 +482,29 @@ if __name__ == '__main__':
                 del e['to_delete']
 
 
+    # cpp-tutor: detect a single-line spin (while(true);) from the RAW stream
+    # BEFORE ONLY_ONE_REC_PER_LINE collapses it. If the program hit the raw
+    # instruction cap while stuck on one (line, frame) -- the tail of the raw
+    # step_line stream is a long run of identical (line, frame) records -- it
+    # is a genuine infinite loop the deduped stream can no longer show.
+    spin_at_cap = False
+    if max_steps_exceeded:
+        run = 0
+        tail_key = None
+        for elt in reversed(final_execution_points):
+            if 'to_delete' in elt:
+                continue
+            if elt.get('event') != 'step_line':
+                break
+            key = (elt['line'],
+                   tuple(f['frame_id'] for f in elt['stack_to_render']))
+            if tail_key is None:
+                tail_key = key
+            if key != tail_key:
+                break
+            run += 1
+        spin_at_cap = run >= SPIN_RUN
+
     # only keep the FIRST 'step_line' event for any given line, to match what
     # a line-level debugger would do
     # (try to do this before other optimizations)
@@ -557,7 +580,7 @@ void *x = foo(); // <-- there is an extraneous step here AFTER foo returns but
     # repetition) vs. programs merely too long (raw cap hit), and trim/label
     # accordingly. Replaces the old fixed 150-step truncation.
     final_execution_points = apply_step_limits(
-        final_execution_points, max_steps_exceeded)
+        final_execution_points, max_steps_exceeded, spin_at_cap=spin_at_cap)
 
 
     # produce the final trace, voila!

@@ -73,13 +73,22 @@ def test_short_run_duplicate_final_state_is_not_a_loop():
     assert out[-1]["event"] == "instruction_limit_reached"
 
 
-def test_single_line_spin_flagged_as_infinite_loop():
-    # while(true); -- a long run of byte-identical consecutive states at the
-    # step cap. No distinct body, but the run length proves the spin.
-    pts = [pt(1, {"i": 0}), pt(2, {"i": 1})]
-    pts += [pt(9, {"s": 0}) for _ in range(9)]  # >= SPIN_RUN identical
-    out = apply_step_limits(pts, True)
+def test_single_line_spin_flagged_via_spin_flag():
+    # while(true); -- ONLY_ONE_REC_PER_LINE dedup collapses the spin to ~2
+    # points before the classifier runs, so vg_to_opt_trace sets spin_at_cap
+    # from the RAW pre-dedup tail. With the flag, even a 2-point trace is a loop.
+    pts = [pt(1, {}), pt(1, {})]
+    out = apply_step_limits(pts, True, spin_at_cap=True)
     assert out[-1]["event"] == "infinite_loop_detected"
+    assert "infinite loop" in out[-1]["exception_msg"]
+
+
+def test_adjacent_pair_without_spin_flag_is_too_long():
+    # Same 2-point adjacent-identical shape WITHOUT the spin flag (the DFS
+    # cut-off shape) stays "too long", not a loop.
+    pts = [pt(1, {}), pt(1, {})]
+    out = apply_step_limits(pts, True, spin_at_cap=False)
+    assert out[-1]["event"] == "instruction_limit_reached"
 
 
 def test_state_repeat_not_flagged_when_terminated_within_budget():
