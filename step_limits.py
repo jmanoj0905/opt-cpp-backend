@@ -15,6 +15,12 @@ import json
 
 DISPLAY_CAP = 2000
 
+# Minimum length of an all-identical tail run that counts as a genuine
+# single-line spin loop (while(true);). Below this, an adjacent/short
+# identical run is a degenerate repeat (e.g. multiple basic-block samples of
+# one multi-part source line caught at the step cap), not a loop.
+SPIN_RUN = 8
+
 # Byte/wall budgets that keep the whole tracing pipeline inside the backend's
 # 60s request timeout even when each step's memory dump is huge (a big
 # std::vector mutated in a long loop writes ~50KB per record; 3500 records is
@@ -61,6 +67,84 @@ def fingerprint(point):
     return json.dumps(state, sort_keys=True)
 
 
+def _tail_run_length(fps):
+    """Count identical fingerprints at the very end of the trace."""
+    last = fps[-1]
+    count = 0
+    for k in range(len(fps) - 1, -1, -1):
+        if fps[k] == last:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _loop_cut_index(points):
+    """Index to trim at for a genuine infinite loop, or None.
+
+    Called only when the program was cut off by the step budget, i.e. it did
+    NOT terminate on its own. Two possibilities:
+
+      * It loops forever -> it was cut off INSIDE its cycle, so the final
+        captured state has occurred before in the trace.
+      * It was merely slow -> it was cut off while still making progress, at a
+        state it has not been in before.
+
+    So we key the decision on the FINAL captured state, not on the first repeat
+    anywhere. An early, coincidental fingerprint match is NOT a cycle and must
+    not truncate the trace:
+
+      * a `call` event and the same-line body `step_line` share a fingerprint
+        (the fingerprint excludes `event`), yet entering a function and running
+        its first line is not a loop; and
+      * a loop header revisited after per-iteration work whose heap allocations
+        are unreachable at the sampling instant (e.g. a leaked structure whose
+        only pointer is a not-yet-assigned local) repeats an observable state
+        while the program is in fact progressing.
+
+    Both are common in ordinary terminating programs (test-case loops, tree
+    builders) and both used to trip a first-repeat scan. Keying on the final
+    state ignores them: the program moves on to fresh states and is cut off at
+    one of them.
+
+    Returns a slice length: keep the trace through the SECOND occurrence of the
+    final state, so the learner sees the loop reach the same state twice (one
+    full period) and then stops -- short for a long loop, whole for a tiny one.
+    Returns None when the final state is novel (no cycle).
+
+    Guards against non-trivial-period false positives too: an adjacent or
+    short-run repeat of the final state with an empty body in between is NOT
+    treated as a cycle unless it is also a genuine single-line spin (a long
+    identical tail run), since a repeat with no observable work between the
+    two sightings can also be two basic-block samples of one multi-part
+    source line caught at the step cap."""
+    n = len(points)
+    if n < 2:
+        return None
+    fps = [fingerprint(p) for p in points]
+    last = fps[-1]
+    first = None
+    for i in range(n):
+        if fps[i] != last:
+            continue
+        if first is None:
+            first = i
+            continue
+        # Second occurrence at i: the pair (first, i) is the cut boundary.
+        # Only a real cycle counts. A real cycle either did observable work
+        # between the two sightings (a distinct intermediate state -> real
+        # loop body) or is a genuine single-line spin (a long identical tail
+        # run). A degenerate repeat -- adjacent sightings with an empty body,
+        # e.g. two basic-block samples of one multi-part source line cut off
+        # at the step cap -- is NOT a loop; the program was still progressing.
+        has_body = any(fps[k] != last for k in range(first + 1, i))
+        is_spin = _tail_run_length(fps) >= SPIN_RUN
+        if has_body or is_spin:
+            return i + 1
+        return None
+    return None
+
+
 def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
     """Trim `points` and tag the final point with an end-of-trace reason.
 
@@ -73,38 +157,24 @@ def apply_step_limits(points, max_steps_exceeded, display_cap=DISPLAY_CAP):
     if not points:
         return points
 
-    # Accepted residual: a terminating-but-very-long program that BOTH exhausts
-    # the budget AND happens to repeat an observable state (possible because the
-    # fingerprint cannot see STL-internal heap/iterator state) is labeled
-    # infinite_loop_detected rather than instruction_limit_reached. Both outcomes
-    # stop the trace gracefully; the mislabel is cosmetic and only on programs
-    # already too long to finish.
     if max_steps_exceeded:
         # Program exhausted the raw budget -- it did NOT terminate on its own.
-        # An exact observable-state repeat now proves a non-progressing cycle
-        # (a terminating program would have finished before the budget ran out
-        # and never reached this branch). No repeat -> merely too long.
-        seen = set()
-        for i, point in enumerate(points):
-            if i >= display_cap:
-                break  # a cycle beyond the display ceiling is not shown;
-                       # fall through to the too-long path below
-            fp = fingerprint(point)
-            if fp in seen:
-                trimmed = points[:i + 1]
-                trimmed[-1] = dict(trimmed[-1])
-                trimmed[-1]["event"] = "infinite_loop_detected"
-                trimmed[-1]["exception_msg"] = _loop_msg(trimmed[-1]["line"])
-                return trimmed
-            seen.add(fp)
-        if len(points) > display_cap:
-            points = points[:display_cap]
-        else:
-            points = points[:]
-        points[-1] = dict(points[-1])
-        points[-1]["event"] = "instruction_limit_reached"
-        points[-1]["exception_msg"] = _TOO_LONG_MSG
-        return points
+        # Decide loop vs. too-long from the final captured state (see
+        # _loop_cut_index). Work within the display window so a decision made on
+        # the final shown state matches what the learner sees.
+        window = points[:display_cap] if len(points) > display_cap else points
+        cut = _loop_cut_index(window)
+        if cut is not None:
+            trimmed = window[:cut]
+            trimmed[-1] = dict(trimmed[-1])
+            trimmed[-1]["event"] = "infinite_loop_detected"
+            trimmed[-1]["exception_msg"] = _loop_msg(trimmed[-1]["line"])
+            return trimmed
+        window = window[:]
+        window[-1] = dict(window[-1])
+        window[-1]["event"] = "instruction_limit_reached"
+        window[-1]["exception_msg"] = _TOO_LONG_MSG
+        return window
 
     # Program terminated within budget -> not an infinite loop. Only guard the
     # display ceiling.
