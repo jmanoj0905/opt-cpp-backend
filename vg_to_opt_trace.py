@@ -54,6 +54,49 @@ all_execution_points = []
 # apart from natural termination. See step_limits.apply_step_limits.
 max_steps_exceeded = False
 
+
+# cpp-tutor: valgrind walks the DWARF lexical blocks that cover the current PC
+# and emits one "locals" entry per variable in each, innermost block first. A
+# shadowed name -- `for (int i = 1; ...)` inside a function that also declares
+# `int i` -- therefore arrives as TWO JSON keys spelled "i", and plain
+# json.loads keeps the last, i.e. the OUTER one. That is wrong twice over: the
+# displayed value is the enclosing variable's (typically <UNINITIALIZED>, since
+# a function-body declaration is in scope for the whole body) and the loop
+# counter's real value is dropped, while ordered_varnames still lists the name
+# once per block so the frontend draws a second, identical, wrong cell.
+#
+# Parse with a hook that remembers the first value of every duplicated key so
+# process_json_obj can prefer it for locals. Regular lookups keep last-wins
+# semantics, so struct decoding (which legitimately repeats "<anon_field>" for
+# multiple base classes) is untouched.
+class _DupAwareDict(dict):
+    first_dups = {}
+
+
+def _dup_aware_pairs(pairs):
+    d = _DupAwareDict()
+    firsts = {}
+    for k, v in pairs:
+        if k in d and k not in firsts:
+            firsts[k] = d[k]
+        d[k] = v
+    if firsts:
+        d.first_dups = firsts
+    return d
+
+
+def dedupe(names):
+    """ordered_varnames with each name kept at its first (innermost) slot."""
+    seen = set()
+    out = []
+    for n in names:
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
 # False if record isn't parsed properly or is an exception
 def process_record(lines):
     global max_steps_exceeded
@@ -81,7 +124,7 @@ def process_record(lines):
         # cases, replace with "val": null so as not to crash the json
         # parser
         rec = rec.replace('"val":******', '"val":null')
-        obj = json.loads(rec)
+        obj = json.loads(rec, object_pairs_hook=_dup_aware_pairs)
     except ValueError:
         print >> sys.stderr, "Ugh, bad record!", rec
         return False
@@ -155,7 +198,7 @@ def process_json_obj(obj, err_str, stdout_str):
         stack.append(stack_obj)
 
         stack_obj['func_name'] = e['func_name']
-        stack_obj['ordered_varnames'] = e['ordered_varnames']
+        stack_obj['ordered_varnames'] = dedupe(e['ordered_varnames'])
         stack_obj['is_highlighted'] = e is top_stack_entry
 
         # FP alone is not a unique frame ID: g++-compiled member functions
@@ -179,8 +222,12 @@ def process_json_obj(obj, err_str, stdout_str):
         enc_locals = {}
         stack_obj['encoded_locals'] = enc_locals
 
+        # Shadowed names: keep the innermost block's variable (see
+        # _dup_aware_pairs above), which is the one the source line refers to.
+        shadowed = getattr(e['locals'], 'first_dups', {})
         for local_var, local_val in e['locals'].iteritems():
-            enc_locals[local_var] = encode_value(local_val, heap)
+            enc_locals[local_var] = encode_value(
+                shadowed.get(local_var, local_val), heap)
 
 
     #pp.pprint(ret)
